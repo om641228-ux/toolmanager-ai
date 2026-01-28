@@ -1,84 +1,98 @@
 const express = require('express');
-const fetch = require('node-fetch');
 const cors = require('cors');
-const app = express();
-const PORT = 3000;
+const Replicate = require('replicate'); // ← Добавляем библиотеку
 
-const DASHSCOPE_API_KEY = 'sk-6a17b9c2e73a4f8fa0a7191190863b42';
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Создаем экземпляр с токеном из переменной окружения
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN
+});
 
 app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Server is running' });
+  res.json({ status: 'ok', message: 'LLaVA backend running' });
 });
 
 app.post('/api/analyze-tool', async (req, res) => {
   try {
+    console.log('🔍 Запрос к LLaVA...');
+    
     const { image } = req.body;
     if (!image) {
       return res.status(400).json({ error: 'No image provided' });
     }
     
-    console.log('🔄 Отправка запроса к DashScope API...');
+    // Конвертируем base64 в изображение (можно сохранить во временный файл)
+    const base64Image = image.split(',')[1];
     
-    const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'qwen-vl-plus',
-        input: {
-          messages: [{
-            role: 'user',
-            content: [
-              { image: image.split(',')[1] },
-              { 
-                text: 'Проанализируй это изображение инструмента. Ответь строго в формате JSON: {"name":"...","type":"ручной/электро/измерительный/режущий/ударный/зажимной","confidence":0.x,"details":{"features":[],"materials":[],"usage":[],"precision":"..."}}'
-              }
-            ]
-          }]
-        }
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('API Error:', data);
-      return res.status(response.status).json({ 
-        error: data.message || data.code || 'API error'
-      });
-    }
-
-    const content = data.output.choices[0].message.content[0].text;
-    const cleaned = content.replace(/```json\n?|\n?```/g, '').trim();
+    // Создаем временный файл или используем URL
+    // Для простоты используем прямой вызов
+    const input = {
+      image: `data:image/jpeg;base64,${base64Image}`,
+      prompt: "USER: <image>\nПроанализируй это изображение инструмента. Ответь в формате:\nназвание | тип | материалы | уверенность 0.9 | особенности | применение | точность.\nASSISTANT:"
+    };
     
-    res.json(JSON.parse(cleaned));
+    console.log('🚀 Отправка запроса...');
+    
+    // Используем метод predict вместо stream для простоты
+    const output = await replicate.run(
+      "yorickvp/llava-13b:80537f9eead1a5bfa72d5ac6ea6414379be41d4d4f6679fd776e9535d1eb58bb",
+      { input }
+    );
+    
+    console.log('📄 Ответ:', output);
+    
+    // Парсим результат
+    const parsed = parseResponse(output);
+    res.json(parsed);
     
   } catch (error) {
-    console.error('❌ Server error:', error);
+    console.error('❌ Ошибка:', error);
     res.status(500).json({ 
-      error: error.message || 'Internal server error',
-      fallback: {
-        name: "Инструмент (резервный режим)",
-        type: "ручной",
-        confidence: 0.85,
-        details: {
-          features: ["Распознано в резервном режиме"],
-          materials: ["Сталь", "Пластик"],
-          usage: ["Универсальное применение"],
-          precision: "Средняя точность"
-        }
-      }
+      error: error.message,
+      fallback: getFallbackTool('Ошибка обработки')
     });
   }
 });
 
+// Функции парсинга (как в предыдущем коде)
+function parseResponse(output) {
+  const text = Array.isArray(output) ? output.join('') : output;
+  const parts = text.split('|').map(p => p.trim());
+  
+  return {
+    name: parts[0] || 'Инструмент',
+    type: 'ручной', // определите тип по тексту
+    confidence: 0.85,
+    details: {
+      features: [parts[1] || 'Распознано через LLaVA'],
+      materials: [parts[2] || 'Сталь, Пластик'],
+      usage: [parts[3] || 'Универсальное применение'],
+      precision: 'Хорошая точность'
+    }
+  };
+}
+
+function getFallbackTool(reason) {
+  return {
+    name: `Инструмент (${reason})`,
+    type: "ручной",
+    confidence: 0.65,
+    details: {
+      features: [reason],
+      materials: ["Сталь", "Пластик"],
+      usage: ["Универсальное применение"],
+      precision: "Базовая точность"
+    }
+  };
+}
+
 app.listen(PORT, () => {
-  console.log('\n✅ ToolManager AI Backend запущен!');
-  console.log(`🌐 Сервер: http://localhost:${PORT}`);
-  console.log(`📡 API: http://localhost:${PORT}/api/analyze-tool`);
-  console.log(`❤️ Health check: http://localhost:${PORT}/health\n`);
+  console.log('\n✅ LLaVA Backend запущен!');
+  console.log(`🌐 Порт: ${PORT}`);
+  console.log(`🔑 Replicate: ${replicate.auth ? '✓' : '✗'}`);
 });
